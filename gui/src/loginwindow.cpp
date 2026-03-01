@@ -204,9 +204,17 @@ void LoginWindow::onLoginClicked()
     QString username = usernameEdit->text().trimmed();
     QString serverAddress = serverAddressEdit->text().trimmed();
     int port = portEdit->text().toInt();
-    
+
+    // 检查用户名是否为空
+    if (username.isEmpty()) {
+        qWarning() << "LoginWindow: 用户名不能为空";
+        statusLabel->setText("用户名不能为空，请输入用户名");
+        statusLabel->setStyleSheet("color: red; font-size: 12px;");
+        return;
+    }
+
     qDebug() << "LoginWindow: 尝试连接到服务器" << serverAddress << ":" << port;
-    
+
     // 调用聊天客户端连接
     m_chatClient->connectToServer(serverAddress, port, username);
 }

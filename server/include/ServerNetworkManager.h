@@ -12,6 +12,9 @@
 #include <mutex>
 #include <map>
 
+// 引入跨平台网络层
+#include "../../common/include/PlatformNetwork.h"
+
 
 class ServerNetworkManager {
 public:

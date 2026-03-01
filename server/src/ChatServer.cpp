@@ -452,6 +452,26 @@ void ChatServer::onMessageReceived(int clientSocket, const std::string& rawMessa
                 handleLoginMessage(clientSocket, message.content);
                 break;
                 
+            case Chat01::MessageType::USER_LIST:
+                // 用户列表请求：发送当前在线用户列表
+                {
+                    std::vector<std::string> users = getConnectedUsersFast();
+                    std::string userListStr;
+                    for (size_t i = 0; i < users.size(); ++i) {
+                        if (i > 0) userListStr += ",";  // 用逗号分隔用户名
+                        userListStr += users[i];
+                    }
+                    
+                    Chat01::NetworkMessage userListMessage(
+                        Chat01::MessageType::USER_LIST,
+                        "系统",
+                        userListStr
+                    );
+                    std::string serializedList = Chat01::MessageSerializer::serialize(userListMessage);
+                    sendToClient(clientSocket, serializedList);
+                }
+                break;
+                
             default:
                 logMessage("未知消息类型: " + std::to_string(static_cast<int>(message.type)));
                 break;

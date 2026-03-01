@@ -31,26 +31,26 @@ MainWindow::MainWindow(ChatClient *chatClient, QWidget *parent)
 {
     // 设置UI界面（使用UI文件中定义的界面）
     setupUi(this);
+
+    // 1. 先初始化状态栏（创建 m_statusLabel 指针）
+    setupStatusBar(); 
     
-    // 初始化菜单栏
+    // 2. 再初始化其他 UI 逻辑
     setupMenuBar();
-    
-    // 初始化信号槽连接
+    setupChatDisplay();
     setupConnections();
     
-    // 设置窗口属性
-    setWindowTitle("Chat01 - 聊天室");
-    setMinimumSize(800, 600);
-    resize(1000, 700);
-    
-    // 初始化状态
+    // 3. 最后再调用涉及到这些指针的状态设置函数
     setUIEnabled(true);
     
-    // 初始化状态栏
-    setupStatusBar();
-    
-    // 初始化聊天显示区域
-    setupChatDisplay();
+    // 4. 设置定时器定期请求用户列表
+    QTimer *userListTimer = new QTimer(this);
+    connect(userListTimer, &QTimer::timeout, [this]() {
+        if (m_chatClient && m_chatClient->isConnected()) {
+            m_chatClient->requestUserList();
+        }
+    });
+    userListTimer->start(5000); // 每5秒请求一次用户列表
     
     qDebug() << "MainWindow: 主窗口创建完成";
 }
@@ -146,6 +146,9 @@ void MainWindow::setupConnections()
             this, &MainWindow::onMessageReceived);
     connect(m_chatClient, &ChatClient::connectionStatusChanged, 
             this, &MainWindow::onConnectionStatusChanged);
+    // 用户列表更新信号
+    connect(m_chatClient, &ChatClient::userListUpdated,
+            this, &MainWindow::updateUserList);
 }
 
 /**

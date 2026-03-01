@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QPointer>
 #include <memory>
 
 // 前向声明，避免包含完整的网络管理器头文件
@@ -56,6 +57,11 @@ public slots:
      * @return 连接状态
      */
     bool isConnected() const;
+    
+    /**
+     * @brief 请求用户列表
+     */
+    void requestUserList();
 
 signals:
     /**
@@ -86,6 +92,12 @@ signals:
      * @brief 断开连接信号
      */
     void disconnected();
+    
+    /**
+     * @brief 用户列表更新信号
+     * @param users 用户列表
+     */
+    void userListUpdated(const QStringList& users);
 
 private:
     std::unique_ptr<ClientNetworkManager> m_networkManager;  // 网络管理器实例

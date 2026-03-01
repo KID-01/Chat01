@@ -1,4 +1,5 @@
 #include "../include/loginwindow.h"
+#include "../include/mainwindow.h"
 #include <QApplication>
 #include <QTranslator>
 #include <QLocale>
@@ -9,6 +10,16 @@
 #include <QDir>
 #include <QMessageBox>
 #include <QDebug>
+#include <QLockFile>
+
+
+#ifdef QT_STATICPLUGIN
+    #include <QtPlugin>
+
+    Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
+    Q_IMPORT_PLUGIN(QGenericEnginePlugin)
+    Q_IMPORT_PLUGIN(QWindowsVistaStylePlugin)
+#endif
 
 /**
  * @brief 应用程序消息处理函数
@@ -139,27 +150,20 @@ void loadApplicationStyle(QApplication &app)
  */
 bool isApplicationAlreadyRunning()
 {
-    // 在临时目录创建锁文件
-    QString lockFilePath = QDir::tempPath() + "/chat01_gui.lock";
-    QFile lockFile(lockFilePath);
+    // 在系统临时目录下创建一个锁文件
+    // 建议文件名包含用户名，避免多用户系统冲突
+    QString lockPath = QDir::tempPath() + "/chat01_gui.lock";
     
-    // 尝试以独占方式打开文件
-    if (!lockFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        // 如果无法打开，说明文件已被其他进程锁定
-        return true;
+    // 使用静态局部变量或由 main 管理，确保在整个程序运行期间对象都存在
+    static QLockFile lockFile(lockPath);
+    
+    // 尝试锁定（tryLock(0) 表示如果不成功立即返回，不等待）
+    if (!lockFile.tryLock(0)) {
+        return true; // 锁定失败，说明已经有一个实例在运行了
     }
     
-    // 写入当前进程ID
-    QTextStream stream(&lockFile);
-    stream << QCoreApplication::applicationPid();
-    lockFile.close();
-    
-    // 应用程序退出时删除锁文件
-    QObject::connect(qApp, &QCoreApplication::aboutToQuit, [lockFilePath]() {
-        QFile::remove(lockFilePath);
-    });
-    
-    return false;
+    return false; // 锁定成功，说明这是第一个运行的实例
+
 }
 
 /**
@@ -214,6 +218,7 @@ int main(int argc, char *argv[])
     qDebug() << "Qt版本:" << qVersion();
     qDebug() << "编译时间:" << __DATE__ << __TIME__;
     
+    
     // 检查是否已有实例运行
     if (isApplicationAlreadyRunning()) {
         QMessageBox::warning(nullptr, "应用程序已运行", 
@@ -222,6 +227,7 @@ int main(int argc, char *argv[])
         qWarning() << "应用程序实例已存在，退出当前实例";
         return 1;
     }
+    
     
     // 加载应用程序样式
     loadApplicationStyle(app);

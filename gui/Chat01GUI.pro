@@ -16,7 +16,8 @@ SOURCES += src/main.cpp \
            src/mainwindow.cpp \
            src/loginwindow.cpp \
            src/chatclient.cpp \
-           ../client/src/ClientNetworkManager.cpp
+           ../client/src/ClientNetworkManager.cpp \
+           ../common/src/PlatformNetwork.cpp
 
 # 头文件目录
 HEADERS += include/mainwindow.h \

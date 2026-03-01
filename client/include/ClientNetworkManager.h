@@ -10,6 +10,9 @@
 #include <atomic>
 #include <mutex>
 
+// 引入跨平台网络层
+#include "../../common/include/PlatformNetwork.h"
+
 class ClientNetworkManager {
 public:
     // 构造函数和析构函数
@@ -30,6 +33,9 @@ public:
     
     // 发送登录消息
     bool sendLoginMessage();
+    
+    // 请求用户列表
+    bool requestUserList();
     
     // 回调函数设置
     void setOnConnected(std::function<void()> callback);
