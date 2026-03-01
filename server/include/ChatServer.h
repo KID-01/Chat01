@@ -11,6 +11,8 @@
 #include <atomic>
 #include <mutex>
 
+#include "../../common/include/PlatformNetwork.h"
+
 class ServerNetworkManager;
 namespace Chat01 { class AccountManager; }
 
@@ -35,7 +37,7 @@ private:
         std::string userID;  // 服务器分配的ID
         bool isLoggedIn;     // 是否已登录
     };
-    std::map<int, ClientInfo> m_connectedClients;  // socket -> (用户名, IP地址, 用户ID, 登录状态)（可以根据socket查看是哪位用户，不用ID搜索）
+    std::map<SocketType, ClientInfo> m_connectedClients;  // socket -> 用户信息（使用 SocketType 避免 64 位截断）
     
     // ID管理
     static const int MAX_USERS = 100;  // 最大在线用户数
@@ -68,16 +70,15 @@ public:
     // 获取连接用户列表（快速，避免阻塞）
     std::vector<std::string> getConnectedUsersFast() const;
     std::vector<std::string> getConnectedUsers() const;// 所有连接的用户
-    void addUser(int socket, const std::string& username, const std::string& ipAddress);// 添加用户（包含IP地址）
-    void removeUser(int socket);// 踢出用户
-    std::string getUsernameBySocket(int socket) const;// 用socket找到用户
-    int getSocketByUsername(const std::string& username) const;// 获取用户的socket
-    std::string getClientInfoBySocket(int socket) const;// 获取客户端完整信息
+    void addUser(SocketType socket, const std::string& username, const std::string& ipAddress);
+    void removeUser(SocketType socket);
+    std::string getUsernameBySocket(SocketType socket) const;
+    SocketType getSocketByUsername(const std::string& username) const;  // 未找到返回 INVALID_SOCKET_VALUE
+    std::string getClientInfoBySocket(SocketType socket) const;
     
-    // 消息处理（业务逻辑），这三个函数ServerNetworkManager也有，这边的是业务逻辑封装，对网络方法的封装和增强
     void broadcastMessage(const std::string& sender, const std::string& content);
-    void broadcastMessageExclude(int excludeSocket, const std::string& sender, const std::string& content);// 组播，前面是被排除的客户端
-    void sendToClient(int clientSocket, const std::string& message);
+    void broadcastMessageExclude(SocketType excludeSocket, const std::string& sender, const std::string& content);
+    void sendToClient(SocketType clientSocket, const std::string& message);
    
     // 获取服务器信息
     std::string getServerInfo() const;
@@ -85,17 +86,13 @@ public:
     // 获取服务器信息（快速，避免阻塞）
     std::string getServerInfoFast() const;
 
-    // 回调函数（供网络管理器调用）
-    void onClientConnected(int clientSocket, const std::string& clientAddress);
-    void onClientDisconnected(int clientSocket);
-    void onMessageReceived(int clientSocket, const std::string& message);
+    void onClientConnected(SocketType clientSocket, const std::string& clientAddress);
+    void onClientDisconnected(SocketType clientSocket);
+    void onMessageReceived(SocketType clientSocket, const std::string& message);
     
 private:
-    // 内部工具方法
     void logMessage(const std::string& message);
-    
-    // 业务逻辑处理（在回调函数中实现）
-    void handleLoginMessage(int clientSocket, const std::string& username);
+    void handleLoginMessage(SocketType clientSocket, const std::string& username);
     
     // ID管理
     std::string allocateUserID();

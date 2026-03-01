@@ -53,6 +53,7 @@ namespace Chat01
         std::string generateUserID();
         std::string getCurrentTime();
         bool isValidUsername(const std::string& username) const;
+        bool ensureDirectoryExists(const std::string& filePath);
     };
 }
 

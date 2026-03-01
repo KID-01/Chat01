@@ -41,21 +41,21 @@ bool ChatServer::start()
         return false;
     }
     
-    // 设置回调函数
+    // 设置回调函数（SocketType 与 ServerNetworkManager 一致）
     m_networkManager->setOnClientConnected(
-        [this](int socket, const std::string& address) {
+        [this](SocketType socket, const std::string& address) {
             this->onClientConnected(socket, address);
         }
     );
     
     m_networkManager->setOnClientDisconnected(
-        [this](int socket) {
+        [this](SocketType socket) {
             this->onClientDisconnected(socket);
         }
     );
     
     m_networkManager->setOnMessageReceived(
-        [this](int socket, const std::string& message) {
+        [this](SocketType socket, const std::string& message) {
             this->onMessageReceived(socket, message);
         }
     );
@@ -114,7 +114,10 @@ std::vector<std::string> ChatServer::getConnectedUsersFast() const
     if (!lock.owns_lock()) {
         // 无法立即获取锁，等待10ms后重试
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        lock.try_lock();
+        // 【修复】必须检查 try_lock 的返回值
+        if (!lock.try_lock()) {
+            return {}; // 依然拿不到锁，安全退出
+        }
         
         if (!lock.owns_lock()) {
             // 仍然无法获取锁，返回空列表
@@ -147,7 +150,7 @@ std::vector<std::string> ChatServer::getConnectedUsers() const
 }
 
 // 添加用户
-void ChatServer::addUser(int socket, const std::string& username, const std::string& ipAddress)
+void ChatServer::addUser(SocketType socket, const std::string& username, const std::string& ipAddress)
 {
     std::lock_guard<std::mutex> lock(m_clientsMutex);
     
@@ -163,7 +166,7 @@ void ChatServer::addUser(int socket, const std::string& username, const std::str
 }
 
 // 移除用户
-void ChatServer::removeUser(int socket)
+void ChatServer::removeUser(SocketType socket)
 {
     std::lock_guard<std::mutex> lock(m_clientsMutex);
     
@@ -177,7 +180,7 @@ void ChatServer::removeUser(int socket)
 }
 
 // 根据socket获取用户名
-std::string ChatServer::getUsernameBySocket(int socket) const
+std::string ChatServer::getUsernameBySocket(SocketType socket) const
 {
     std::lock_guard<std::mutex> lock(m_clientsMutex);
     
@@ -190,8 +193,8 @@ std::string ChatServer::getUsernameBySocket(int socket) const
     return "";
 }
 
-// 根据用户名获取socket
-int ChatServer::getSocketByUsername(const std::string& username) const
+// 根据用户名获取socket，未找到返回 INVALID_SOCKET_VALUE
+SocketType ChatServer::getSocketByUsername(const std::string& username) const
 {
     std::lock_guard<std::mutex> lock(m_clientsMutex);
     
@@ -203,11 +206,11 @@ int ChatServer::getSocketByUsername(const std::string& username) const
         }
     }
     
-    return -1;
+    return INVALID_SOCKET_VALUE;
 }
 
 // 获取客户端完整信息
-std::string ChatServer::getClientInfoBySocket(int socket) const
+std::string ChatServer::getClientInfoBySocket(SocketType socket) const
 {
     std::lock_guard<std::mutex> lock(m_clientsMutex);
     
@@ -283,7 +286,7 @@ void ChatServer::broadcastMessage(const std::string& sender, const std::string& 
 }
 
 // 组播消息，排除指定客户端
-void ChatServer::broadcastMessageExclude(int excludeSocket, const std::string& sender, const std::string& content)
+void ChatServer::broadcastMessageExclude(SocketType excludeSocket, const std::string& sender, const std::string& content)
 {
     // 使用NetworkProtocol格式化消息
     Chat01::NetworkMessage message(Chat01::MessageType::TEXT_MESSAGE, sender, content);
@@ -306,7 +309,7 @@ void ChatServer::broadcastMessageExclude(int excludeSocket, const std::string& s
 }
 
 // 发送消息给特定客户端
-void ChatServer::sendToClient(int clientSocket, const std::string& message)
+void ChatServer::sendToClient(SocketType clientSocket, const std::string& message)
 {
     // 直接发送原始消息（用于系统消息等）
     if (m_networkManager)
@@ -338,7 +341,7 @@ std::string ChatServer::getServerInfo() const
 }
 
 // 客户端连接回调
-void ChatServer::onClientConnected(int clientSocket, const std::string& clientAddress)
+void ChatServer::onClientConnected(SocketType clientSocket, const std::string& clientAddress)
 {
     logMessage("客户端连接: socket=" + std::to_string(clientSocket) + ", IP=" + clientAddress);
     
@@ -355,7 +358,7 @@ void ChatServer::onClientConnected(int clientSocket, const std::string& clientAd
 }
 
 // 客户端断开连接回调
-void ChatServer::onClientDisconnected(int clientSocket)
+void ChatServer::onClientDisconnected(SocketType clientSocket)
 {
     std::string username = getUsernameBySocket(clientSocket);
     
@@ -397,7 +400,7 @@ void ChatServer::onClientDisconnected(int clientSocket)
 }
 
 // 消息接收回调
-void ChatServer::onMessageReceived(int clientSocket, const std::string& rawMessage)
+void ChatServer::onMessageReceived(SocketType clientSocket, const std::string& rawMessage)
 {
     std::string username = getUsernameBySocket(clientSocket);
     
@@ -452,6 +455,26 @@ void ChatServer::onMessageReceived(int clientSocket, const std::string& rawMessa
                 handleLoginMessage(clientSocket, message.content);
                 break;
                 
+            case Chat01::MessageType::USER_LIST:
+                // 用户列表请求：发送当前在线用户列表
+                {
+                    std::vector<std::string> users = getConnectedUsersFast();
+                    std::string userListStr;
+                    for (size_t i = 0; i < users.size(); ++i) {
+                        if (i > 0) userListStr += ",";  // 用逗号分隔用户名
+                        userListStr += users[i];
+                    }
+                    
+                    Chat01::NetworkMessage userListMessage(
+                        Chat01::MessageType::USER_LIST,
+                        "系统",
+                        userListStr
+                    );
+                    std::string serializedList = Chat01::MessageSerializer::serialize(userListMessage);
+                    sendToClient(clientSocket, serializedList);
+                }
+                break;
+                
             default:
                 logMessage("未知消息类型: " + std::to_string(static_cast<int>(message.type)));
                 break;
@@ -472,7 +495,7 @@ void ChatServer::onMessageReceived(int clientSocket, const std::string& rawMessa
 }
 
 // 处理登录消息
-void ChatServer::handleLoginMessage(int clientSocket, const std::string& username)
+void ChatServer::handleLoginMessage(SocketType clientSocket, const std::string& username)
 {
     if (username.empty())
     {

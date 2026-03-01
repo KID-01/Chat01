@@ -10,6 +10,11 @@
 #include <atomic>
 #include <mutex>
 
+// 引入跨平台网络层
+#include "../../common/include/PlatformNetwork.h"
+// 引入网络协议
+#include "../../common/include/NetworkProtocol.h"
+
 class ClientNetworkManager {
 public:
     // 构造函数和析构函数
@@ -31,6 +36,12 @@ public:
     // 发送登录消息
     bool sendLoginMessage();
     
+    // 获取最后一次发送错误信息
+    std::string getLastSendError();
+    
+    // 请求用户列表
+    bool requestUserList();
+    
     // 回调函数设置
     void setOnConnected(std::function<void()> callback);
     void setOnDisconnected(std::function<void()> callback);
@@ -38,8 +49,8 @@ public:
     void setOnError(std::function<void(const std::string&)> callback);
 
 private:
-    // 网络状态
-    int m_socket;
+    // 网络状态（使用 SocketType：Linux 为 int，Windows 为 SOCKET/UINT_PTR，避免 64 位截断导致 select/FD_SET 失效）
+    SocketType m_socket;
     std::atomic<bool> m_connected;
     std::string m_serverAddress;
     int m_port;
@@ -55,9 +66,14 @@ private:
     std::function<void(const std::string&, const std::string&)> m_onMessageReceived;
     std::function<void(const std::string&)> m_onError;
     
+    // 最后一次发送错误信息
+    std::string m_lastSendError;
+    std::mutex m_errorMutex;
+    
     // 私有方法
     void receiveLoop();  // 接收消息的循环
     void log(const std::string& message);  // 日志记录
+    bool validateMessageFormat(const Chat01::NetworkMessage& message);  // 验证消息格式
 };
 
 #endif

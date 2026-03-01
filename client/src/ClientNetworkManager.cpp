@@ -4,394 +4,464 @@
 #include "../../common/include/User.h"
 #include "../../common/include/Message.h"
 #include "../../common/include/NetworkProtocol.h"
+#include "../../common/include/PlatformNetwork.h"
 #include <iostream>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <unistd.h>
-#include <fcntl.h>
-#include <sys/select.h>
 #include <cstring>
 #include <stdexcept>
 #include <thread>
 #include <chrono>
 
+using namespace Chat01;
+
+// 解决 Windows 下 ssize_t 和 close 的兼容性问题
+#ifdef _WIN32
+typedef intptr_t ssize_t;
+#define CLOSE_FUNC closesocket
+#else
+#define CLOSE_FUNC close
+#endif
+
 // 构造函数
-ClientNetworkManager::ClientNetworkManager() 
-    : m_socket(-1)
+ClientNetworkManager::ClientNetworkManager()
+    : m_socket(INVALID_SOCKET_VALUE)
     , m_connected(false)
     , m_port(8080)
     , m_running(false)
 {
+    PlatformNetwork::Initialize();
     log("ClientNetworkManager Created");
 }
 
 // 析构函数
-ClientNetworkManager::~ClientNetworkManager() 
+ClientNetworkManager::~ClientNetworkManager()
 {
-    disconnect();
+    m_onConnected = nullptr;
+    m_onDisconnected = nullptr;
+    m_onMessageReceived = nullptr;
+    m_onError = nullptr;
+
+    if (m_connected)
+    {
+        m_running = false;
+        if (PlatformNetwork::IsValidSocket(m_socket))
+        {
+            PlatformNetwork::CloseSocket(m_socket);
+            m_socket = INVALID_SOCKET_VALUE;
+        }
+
+        if (m_receiveThread.joinable())
+        {
+            m_receiveThread.join();
+        }
+        m_connected = false;
+    }
+    PlatformNetwork::Cleanup();
     log("ClientNetworkManager Destroyed");
 }
 
 // 连接到服务器
-bool ClientNetworkManager::connectToServer(const std::string& address, int port, const std::string& username) 
+bool ClientNetworkManager::connectToServer(const std::string& address, int port, const std::string& username)
 {
-    if (m_connected) 
+    if (m_connected)
     {
         log("Already connected to server");
         return false;
     }
-    
-    // 初始化信息
+
     m_serverAddress = address;
     m_port = port;
     m_username = username;
-    
-    // 创建socket
-    m_socket = socket(AF_INET, SOCK_STREAM, 0);
-    if (m_socket < 0) 
+
+    m_socket = PlatformNetwork::CreateSocket();
+    if (!PlatformNetwork::IsValidSocket(m_socket))
     {
-        log("Failed to create socket");
+        std::string err = "创建套接字失败: " + PlatformNetwork::GetErrorMessage();
+        log(err);
+        if (m_onError) m_onError(err);
         return false;
     }
-    
-    // 设置socket为非阻塞模式，以便能够及时退出
-    int flags = fcntl(m_socket, F_GETFL, 0);
-    if (flags == -1) 
+
+    // 设置为非阻塞以进行带超时的连接
+    PlatformNetwork::SetNonBlocking(m_socket, true);
+
+    int connectResult = PlatformNetwork::ConnectToServer(m_socket, address, port);
+    if (connectResult < 0)
     {
-        log("Failed to get socket flags");
-        close(m_socket);
-        m_socket = -1;
-        return false;
-    }
-    
-    if (fcntl(m_socket, F_SETFL, flags | O_NONBLOCK) == -1) 
-    {
-        log("Failed to set socket to non-blocking mode");
-        close(m_socket);
-        m_socket = -1;
-        return false;
-    }
-    
-    // 设置服务器地址
-    struct sockaddr_in serverAddr;
-    memset(&serverAddr, 0, sizeof(serverAddr));
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    
-    // 转换IP地址（支持localhost）
-    std::string resolvedAddress = address;
-    if (address == "localhost") {
-        resolvedAddress = "127.0.0.1";
-    }
-    
-    if (inet_pton(AF_INET, resolvedAddress.c_str(), &serverAddr.sin_addr) <= 0) 
-    {
-        log("Invalid server address: " + address);
-        close(m_socket);
-        m_socket = -1;
-        return false;
-    }
-    
-    // 建立连接（非阻塞模式）
-    if (::connect(m_socket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) 
-    {
-        if (errno != EINPROGRESS) 
+        int connectError = GET_LAST_ERROR;
+#ifdef _WIN32
+        // Windows: WSAEWOULDBLOCK(10035)/WSAEINPROGRESS(10036) 表示“正在连接”，需用 select 等待
+        const bool inProgress = (connectError == EINPROGRESS || connectError == EWOULDBLOCK
+            || connectError == 10035 || connectError == 10036);
+#else
+        const bool inProgress = (connectError == EINPROGRESS || connectError == EWOULDBLOCK);
+#endif
+        if (!inProgress)
         {
-            log("Failed to connect to server: " + std::string(strerror(errno)));
-            close(m_socket);
-            m_socket = -1;
+            std::string err = "连接被拒绝或网络错误: " + PlatformNetwork::GetErrorMessage();
+            log(err);
+            if (m_onError) m_onError(err);
+            PlatformNetwork::CloseSocket(m_socket);
+            m_socket = INVALID_SOCKET_VALUE;
             return false;
         }
-        
-        // 连接正在进行中，使用select等待连接完成
+
         fd_set writefds;
-        struct timeval timeout;
-        
         FD_ZERO(&writefds);
         FD_SET(m_socket, &writefds);
-        
-        timeout.tv_sec = 5;  // 5秒超时
-        timeout.tv_usec = 0;
-        
-        int selectResult = select(m_socket + 1, nullptr, &writefds, nullptr, &timeout);
-        
-        if (selectResult <= 0) 
+
+        int selectResult = PlatformNetwork::Select(m_socket, nullptr, &writefds, nullptr, 5);
+
+        if (selectResult <= 0)
         {
-            log("Connection timeout or error: " + std::string(strerror(errno)));
-            close(m_socket);
-            m_socket = -1;
+            std::string err = "连接超时（5秒内未完成），请检查地址与端口及防火墙";
+            log(err);
+            if (m_onError) m_onError(err);
+            PlatformNetwork::CloseSocket(m_socket);
+            m_socket = INVALID_SOCKET_VALUE;
             return false;
         }
-        
-        // 检查连接是否成功
+
+        // 【修复 1】跨平台检查 SO_ERROR；Windows 需要 (char*) 强转，且 optlen 为 int*
+#ifdef _WIN32
+        int error = 0;
+        int len = sizeof(error);
+        if (getsockopt(m_socket, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&error), &len) < 0)
+#else
         int error = 0;
         socklen_t len = sizeof(error);
-        if (getsockopt(m_socket, SOL_SOCKET, SO_ERROR, &error, &len) < 0 || error != 0) 
+        if (getsockopt(m_socket, SOL_SOCKET, SO_ERROR, (char*)&error, &len) < 0)
+#endif
         {
-            log("Connection failed: " + std::string(strerror(error)));
-            close(m_socket);
-            m_socket = -1;
+            std::string err = "连接状态检查失败: " + PlatformNetwork::GetErrorMessage();
+            log(err);
+            if (m_onError) m_onError(err);
+            PlatformNetwork::CloseSocket(m_socket);
+            m_socket = INVALID_SOCKET_VALUE;
+            return false;
+        }
+
+        if (error != 0)
+        {
+            std::string err = "连接失败(错误码 " + std::to_string(error) + ")";
+            log(err);
+            if (m_onError) m_onError(err);
+            PlatformNetwork::CloseSocket(m_socket);
+            m_socket = INVALID_SOCKET_VALUE;
             return false;
         }
     }
-    
-    // 启动接收线程
-    m_running = true;
-    m_receiveThread = std::thread(&ClientNetworkManager::receiveLoop, this);// 第一个参数是成员函数指针，第二个参数是调用该成员函数的对象指针
-    
+
     m_connected = true;
+    m_running = true;
+
+    // 连接建立成功后恢复为阻塞模式
+    PlatformNetwork::SetNonBlocking(m_socket, false);
+
+    // 先启动接收线程，再发送登录消息，确保能接收服务器的欢迎消息和登录成功消息
+    m_receiveThread = std::thread(&ClientNetworkManager::receiveLoop, this);
     
-    // 触发连接成功回调函数，让用户知道连接成功
-    if (m_onConnected)// 检查m_onConnected回调函数是否被设置（不是空指针）
-    {
-        m_onConnected();// 调用连接成功的回调函数
-    }
-    
-    // 等待服务器完全准备好（100毫秒延迟，避免时序竞争）
+    // 给接收线程一点时间初始化
     std::this_thread::sleep_for(std::chrono::milliseconds(100));
     
-    // 连接成功后发送登录消息
-    if (!sendLoginMessage()) 
+    if (!sendLoginMessage())
     {
-        log("Failed to send login message");
+        std::string err = "登录包发送失败: " + getLastSendError();
+        log(err);
+        if (m_onError) m_onError(err);
         disconnect();
         return false;
     }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (m_onConnected) m_onConnected();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+
+
+    /*
+    // 可选重试（首包已在上方发送）
+    bool loginSuccess = false;
+    for (int attempt = 0; attempt < 3; ++attempt)
+    {
+        if (attempt > 0 && !sendLoginMessage())
+        {
+            log("Login retry " + std::to_string(attempt) + " send failed");
+            if (m_onError) m_onError("登录重发失败: " + PlatformNetwork::GetErrorMessage());
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            continue;
+        }
+
+        auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(2))
+        {
+            if (!m_running || !m_connected) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        loginSuccess = true;
+        break;
+    }
     
-    // 连接服务器成功（日志已隐藏）
+
+    if (!loginSuccess)
+    {
+        if (m_onError) m_onError("登录超时或连接已断开");
+        disconnect();
+        return false;
+    }
+    */
+
     return true;
 }
 
 // 断开连接
-void ClientNetworkManager::disconnect() 
+void ClientNetworkManager::disconnect()
 {
-    if (!m_connected) 
-    {
-        return;
-    }
-    
+    if (!m_connected) return;
+
     m_running = false;
-    
-    // 关闭socket
-    if (m_socket != -1) 
+    if (PlatformNetwork::IsValidSocket(m_socket))
     {
-        close(m_socket);
-        m_socket = -1;
+        // 【修复 2】使用统一的 CloseSocket
+        PlatformNetwork::CloseSocket(m_socket);
+        m_socket = INVALID_SOCKET_VALUE;
     }
-    
-    // 等待接收线程结束
-    if (m_receiveThread.joinable())// 检查线程是否可以被加入（join）
-    {
-        m_receiveThread.join();// 主线程会在这里等待，直到接收线程执行完毕
-    }
-    
+
+    if (m_receiveThread.joinable()) m_receiveThread.join();
+
     m_connected = false;
-    
-    // 触发断开连接回调函数
-    if (m_onDisconnected) 
-    {
-        m_onDisconnected();
-    }
-    
+    if (m_onDisconnected) m_onDisconnected();
     log("Disconnected from server");
 }
 
-// 检查连接状态
-bool ClientNetworkManager::isConnected() const 
-{
-	return m_connected;
-}
+bool ClientNetworkManager::isConnected() const { return m_connected; }
 
 // 发送消息
-bool ClientNetworkManager::sendMessage(const std::string& content) 
+bool ClientNetworkManager::sendMessage(const std::string& content)
 {
-	// 没有建立连接就无法发送消息
-    if (!m_connected || m_socket == -1) 
-    {
-        log("Error: Not connected to server");
-        if (m_onError) 
-        {
-            m_onError("Not connected to server");
-        }
+    if (!m_connected || !PlatformNetwork::IsValidSocket(m_socket)) return false;
+
+    Chat01::NetworkMessage netMessage(Chat01::MessageType::TEXT_MESSAGE, m_username, content);
+    
+    // 验证消息格式
+    if (!validateMessageFormat(netMessage)) {
+        log("Message format validation failed before sending");
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = "消息格式验证失败";
         return false;
     }
     
-    // 创建网络消息并序列化
-    Chat01::NetworkMessage netMessage(
-        Chat01::MessageType::TEXT_MESSAGE,
-        m_username,
-        content
-    );
-    
-    // 序列化消息
     std::string serializedMessage = Chat01::MessageSerializer::serialize(netMessage);
+
+    // 使用包装好的 PlatformNetwork::Send
+    int sent = PlatformNetwork::Send(m_socket, serializedMessage.c_str(), static_cast<int>(serializedMessage.length()));
     
-    // ::send()是全局作用域的send函数，POSIX标准的socket发送函数
-    ssize_t sent = ::send(m_socket, serializedMessage.c_str(), serializedMessage.length(), 0);
-    if (sent == -1) 
+    if (sent == SOCKET_ERROR_VALUE) {
+        // 立即捕获错误信息，避免被其他线程覆盖
+        std::string errorMsg = PlatformNetwork::GetErrorMessage();
+        log("Failed to send message: " + errorMsg);
+        // 将错误信息存储到成员变量
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = errorMsg;
+        return false;
+    }
+    else if (sent == 0)
     {
-        log("Failed to send message: " + std::string(strerror(errno)));
-        if (m_onError) 
-        {
-            m_onError("Failed to send message: " + std::string(strerror(errno)));
-        }
+        // 发送了0字节，表示连接已关闭
+        log("Failed to send message: connection closed");
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = "连接已关闭";
         return false;
     }
     
-    log("Message sent successfully: " + content);
+    log("Sent message: " + content);
     return true;
 }
 
 // 发送登录消息
 bool ClientNetworkManager::sendLoginMessage()
 {
-    if (!m_connected || m_socket == -1) 
-    {
-        log("Error: Not connected to server");
+    if (!m_connected || !PlatformNetwork::IsValidSocket(m_socket)) return false;
+
+    Chat01::NetworkMessage loginMessage(Chat01::MessageType::LOGIN_REQUEST, m_username, m_username);
+    
+    // 验证消息格式
+    if (!validateMessageFormat(loginMessage)) {
+        log("Login message format validation failed before sending");
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = "消息格式验证失败";
         return false;
     }
     
-    // 创建登录消息
-    Chat01::NetworkMessage loginMessage(
-        Chat01::MessageType::LOGIN_REQUEST,
-        m_username,
-        m_username  // 使用用户名作为登录内容
-    );
-    
-    // 序列化消息
-    std::string serializedMessage = Chat01::MessageSerializer::serialize(loginMessage);
-    
-    // 发送登录消息
-    ssize_t sent = ::send(m_socket, serializedMessage.c_str(), serializedMessage.length(), 0);
-    if (sent == -1) 
+    std::string serialized = Chat01::MessageSerializer::serialize(loginMessage);
+
+    int sent = PlatformNetwork::Send(m_socket, serialized.c_str(), static_cast<int>(serialized.length()));
+
+    log("[DEBUG] sendLoginMessage() sent " + std::to_string(sent) + " bytes, raw: " + serialized);
+
+    if (sent == SOCKET_ERROR_VALUE)
     {
-        log("Failed to send login message: " + std::string(strerror(errno)));
+        // 立即捕获错误信息，避免被其他线程覆盖
+        std::string errorMsg = PlatformNetwork::GetErrorMessage();
+        log("[DEBUG] sendLoginMessage() failed: " + errorMsg);
+        // 将错误信息存储到成员变量，供调用方获取
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = errorMsg;
+    }
+    else if (sent == 0)
+    {
+        // 发送了0字节，表示连接已关闭
+        log("[DEBUG] sendLoginMessage() sent 0 bytes, connection closed");
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = "连接已关闭";
+    }
+
+    return sent != SOCKET_ERROR_VALUE && sent > 0;
+}
+
+// 获取最后一次发送错误信息
+std::string ClientNetworkManager::getLastSendError()
+{
+    std::lock_guard<std::mutex> lock(m_errorMutex);
+    return m_lastSendError;
+}
+
+// 请求用户列表
+bool ClientNetworkManager::requestUserList()
+{
+    if (!m_connected || !PlatformNetwork::IsValidSocket(m_socket)) return false;
+
+    Chat01::NetworkMessage userListRequest(Chat01::MessageType::USER_LIST, m_username, "REQUEST_USER_LIST");
+    
+    // 验证消息格式
+    if (!validateMessageFormat(userListRequest)) {
+        log("User list request format validation failed before sending");
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = "消息格式验证失败";
         return false;
     }
     
-    // 登录消息发送成功（日志已隐藏）
+    std::string serialized = Chat01::MessageSerializer::serialize(userListRequest);
+
+    int sent = PlatformNetwork::Send(m_socket, serialized.c_str(), static_cast<int>(serialized.length()));
+    
+    if (sent == SOCKET_ERROR_VALUE) {
+        // 立即捕获错误信息，避免被其他线程覆盖
+        std::string errorMsg = PlatformNetwork::GetErrorMessage();
+        log("Failed to send user list request: " + errorMsg);
+        // 将错误信息存储到成员变量
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = errorMsg;
+        return false;
+    }
+    else if (sent == 0)
+    {
+        // 发送了0字节，表示连接已关闭
+        log("Failed to send user list request: connection closed");
+        std::lock_guard<std::mutex> lock(m_errorMutex);
+        m_lastSendError = "连接已关闭";
+        return false;
+    }
+    
+    return true;
+}
+
+// 验证消息格式
+bool ClientNetworkManager::validateMessageFormat(const NetworkMessage& message)
+{
+    // 验证消息类型
+    int msgType = static_cast<int>(message.type);
+    if (msgType < 1 || msgType > 7) { // 7 is the maximum MessageType value
+        log("Invalid message type: " + std::to_string(msgType));
+        return false;
+    }
+    
+    // 验证发送者
+    if (message.sender.empty()) {
+        log("Empty sender in message");
+        return false;
+    }
+    
+    // 验证时间戳 - timestamp现在是long long类型，可以正确表示毫秒时间
+    if (message.timestamp <= 0) {
+        log("Invalid timestamp: " + std::to_string(message.timestamp));
+        // 时间戳验证失败不返回false，只记录日志
+    }
+    
+    // 验证消息内容（可选，根据业务需求）
+    // 这里可以添加更多的消息内容验证逻辑
+    
     return true;
 }
 
 // 接收消息循环
-void ClientNetworkManager::receiveLoop() 
+void ClientNetworkManager::receiveLoop()
 {
     char buffer[4096];
     std::string recvBuf;
 
-    while (m_running && m_connected) 
+    while (m_running && m_connected)
     {
-        // 接收消息
-        ssize_t received = recv(m_socket, buffer, sizeof(buffer), 0);
+        int received = PlatformNetwork::Receive(m_socket, buffer, sizeof(buffer));
 
-        // 处理接收结果
-        if (received > 0) 
+        if (received > 0)
         {
-            // 将数据追加到接收缓冲
             recvBuf.append(buffer, static_cast<size_t>(received));
-
-            // 按行解析完整消息（每条消息以"\n"分隔）
             size_t pos = 0;
             while ((pos = recvBuf.find('\n')) != std::string::npos)
             {
                 std::string line = recvBuf.substr(0, pos);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
 
-                if (!line.empty())
+                if (!line.empty() && m_onMessageReceived)
                 {
-                    // 解析消息并触发回调
-                    if (m_onMessageReceived) 
-                    {
-                        try {
-                            Chat01::NetworkMessage netMessage = Chat01::MessageSerializer::deserialize(line);
-                            switch (netMessage.type) {
-                                case Chat01::MessageType::TEXT_MESSAGE:
-                                    m_onMessageReceived(netMessage.sender, netMessage.content);
-                                    break;
-                                case Chat01::MessageType::USER_JOIN:
-                                    m_onMessageReceived(netMessage.sender, netMessage.content);
-                                    break;
-                                case Chat01::MessageType::USER_LEAVE:
-                                    m_onMessageReceived(netMessage.sender, netMessage.content);
-                                    break;
-                                case Chat01::MessageType::ERROR_MESSAGE:
-                                    m_onMessageReceived("系统错误", netMessage.content);
-                                    break;
-                                default:
-                                    m_onMessageReceived("系统", "收到未知类型的消息");
-                                    break;
-                            }
-                        }
-                        catch (const std::exception& e) {
-                            log("消息反序列化失败: " + std::string(e.what()));
-                            m_onMessageReceived("服务器", line);
-                        }
+                    try {
+                        Chat01::NetworkMessage netMessage = Chat01::MessageSerializer::deserialize(line);
+                        // 简化分发逻辑
+                        if (netMessage.type == Chat01::MessageType::USER_LIST)
+                            m_onMessageReceived("USER_LIST", netMessage.content);
+                        else
+                            m_onMessageReceived(netMessage.sender, netMessage.content);
+                    }
+                    catch (...) {
+                        log("Message deserialization failed");
                     }
                 }
-
-                // 移除已处理的行
                 recvBuf.erase(0, pos + 1);
             }
         }
-        else if (received == 0) 
+        else if (received == 0)
         {
-            // 服务器关闭连接
-            log("Server closed the connection");
+            // 对于阻塞模式，received == 0 明确代表对端关闭
             m_connected = false;
-            if (m_onDisconnected) 
-            {
-                m_onDisconnected();
-            }
+            if (m_onDisconnected) m_onDisconnected();
             break;
         }
-	// 接收错误
         else
         {
-            if (errno != EAGAIN && errno != EWOULDBLOCK) 
-            {
-                log("Error receiving message: " + std::string(strerror(errno)));
-                if (m_onError) 
-                {
-                    m_onError("Error receiving message: " + std::string(strerror(errno)));
-                }
-                break;
-            }
+            int error = GET_LAST_ERROR;
+            // 如果是阻塞模式且被系统中断，则继续；否则判定为错误
+#ifdef _WIN32
+            if (error == WSAEINTR) continue;
+#else
+            if (error == EINTR) continue;
+#endif
+            log("Receive error: " + std::to_string(error));
+            m_connected = false;
+            if (m_onDisconnected) m_onDisconnected();
+            break;
         }
-        
-        // 短暂睡眠以避免高CPU使用率，同时让线程能够及时退出
-        for (int i = 0; i < 10 && m_running; i++) 
-        {
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    
-    log("接收线程已退出");
+    log("Receive thread exited");
 }
 
-// 打日志
-void ClientNetworkManager::log(const std::string& message) 
-{
+void ClientNetworkManager::log(const std::string& message) {
     std::cout << "[ClientNetworkManager] " << message << std::endl;
 }
 
-// 回调函数实现
-void ClientNetworkManager::setOnConnected(std::function<void()> callback) 
-{
-    m_onConnected = callback;
-}
-
-void ClientNetworkManager::setOnDisconnected(std::function<void()> callback) 
-{
-    m_onDisconnected = callback;
-}
-
-void ClientNetworkManager::setOnMessageReceived(std::function<void(const std::string&, const std::string&)> callback) 
-{
-    m_onMessageReceived = callback;
-}
-
-void ClientNetworkManager::setOnError(std::function<void(const std::string&)> callback) 
-{
-    m_onError = callback;
-}
+// 回调设置函数保持不变
+void ClientNetworkManager::setOnConnected(std::function<void()> callback) { m_onConnected = callback; }
+void ClientNetworkManager::setOnDisconnected(std::function<void()> callback) { m_onDisconnected = callback; }
+void ClientNetworkManager::setOnMessageReceived(std::function<void(const std::string&, const std::string&)> callback) { m_onMessageReceived = callback; }
+void ClientNetworkManager::setOnError(std::function<void(const std::string&)> callback) { m_onError = callback; }

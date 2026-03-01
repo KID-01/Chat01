@@ -2,6 +2,8 @@
 #include "../../client/include/ClientNetworkManager.h"
 #include <QDebug>
 #include <QTimer>
+#include <QMutex>
+#include <QMutexLocker>
 #include <iostream>
 
 /**
@@ -42,65 +44,83 @@ void ChatClient::connectToServer(const QString& address, int port, const QString
 {
     qDebug() << "ChatClient: 尝试连接到服务器" << address << ":" << port << "用户名:" << username;
     
+    m_lastConnectionError.clear();
+    
     if (m_connected) {
         qWarning() << "ChatClient: 已经连接到服务器，请先断开连接";
         emit errorOccurred("已经连接到服务器，请先断开连接");
         return;
     }
     
-    // 保存用户名
     m_currentUsername = username;
     
     try {
-        // 转换为std::string（现有网络代码使用）
         std::string serverAddress = address.toStdString();
         std::string user = username.toStdString();
         
+        QPointer<ChatClient> self(this);
+        
         // 设置回调函数（将C++回调转换为Qt信号）
-        m_networkManager->setOnConnected([this]() {
+        m_networkManager->setOnConnected([self]() {
+            if (!self) {
+                qWarning() << "ChatClient: 连接成功回调被调用，但对象已销毁";
+                return;
+            }
             qDebug() << "ChatClient: 连接成功回调被调用";
-            m_connected = true;
-            emit connectionStatusChanged(true);
-            emit connected();
+            self->m_connected = true;
+            emit self->connectionStatusChanged(true);
+            emit self->connected();
             qDebug() << "ChatClient: 连接服务器成功";
         });
         
-        m_networkManager->setOnDisconnected([this]() {
+        m_networkManager->setOnDisconnected([self]() {
+            if (!self) {
+                qWarning() << "ChatClient: 断开连接回调被调用，但对象已销毁";
+                return;
+            }
             qDebug() << "ChatClient: 断开连接回调被调用";
-            m_connected = false;
-            emit connectionStatusChanged(false);
-            emit disconnected();
+            self->m_connected = false;
+            emit self->connectionStatusChanged(false);
+            emit self->disconnected();
             qDebug() << "ChatClient: 与服务器断开连接";
         });
         
-        m_networkManager->setOnMessageReceived([this](const std::string& sender, const std::string& content) {
+        m_networkManager->setOnMessageReceived([self](const std::string& sender, const std::string& content) {
+            if (!self) {
+                qWarning() << "ChatClient: 消息接收回调被调用，但对象已销毁";
+                return;
+            }
+            
             QString qSender = QString::fromStdString(sender);
             QString qContent = QString::fromStdString(content);
-            emit messageReceived(qSender, qContent);
-            qDebug() << "ChatClient: 收到消息 from" << qSender << ":" << qContent;
+            
+            // 特殊处理用户列表消息
+            if (qSender == "USER_LIST") {
+                // 解析用户列表（逗号分隔的用户名列表）
+                QStringList userList = qContent.split(",", Qt::SkipEmptyParts);
+                emit self->userListUpdated(userList);
+                qDebug() << "ChatClient: 收到用户列表，用户数量:" << userList.size();
+            } else {
+                emit self->messageReceived(qSender, qContent);
+                qDebug() << "ChatClient: 收到消息 from" << qSender << ":" << qContent;
+            }
         });
         
-        m_networkManager->setOnError([this](const std::string& error) {
+        m_networkManager->setOnError([self](const std::string& error) {
+            if (!self) return;
             QString qError = QString::fromStdString(error);
-            emit errorOccurred(qError);
+            self->m_lastConnectionError = qError;
+            emit self->errorOccurred(qError);
             qWarning() << "ChatClient: 网络错误:" << qError;
         });
         
-        // 执行连接
         bool success = m_networkManager->connectToServer(serverAddress, port, user);
         
         if (!success) {
             qWarning() << "ChatClient: 连接服务器失败";
-            
-            // 连接失败时，模拟连接成功用于测试窗口切换
-            qDebug() << "ChatClient: 模拟连接成功用于测试";
-            QTimer::singleShot(500, this, [this]() {
-                qDebug() << "ChatClient: 模拟连接成功回调执行";
-                m_connected = true;
-                emit connectionStatusChanged(true);
-                emit connected();
-                qDebug() << "ChatClient: 模拟连接成功信号已发出";
-            });
+            // 仅当网络层未上报具体原因时再发通用提示（避免与 onError 重复弹窗）
+            if (m_lastConnectionError.isEmpty())
+                emit errorOccurred("连接服务器失败，请检查服务器地址和端口");
         } else {
             qDebug() << "ChatClient: 连接服务器成功（真实连接）";
         }
@@ -109,16 +129,6 @@ void ChatClient::connectToServer(const QString& address, int port, const QString
         QString error = QString("连接异常: %1").arg(e.what());
         emit errorOccurred(error);
         qCritical() << "ChatClient: 连接异常:" << error;
-        
-        // 异常情况下也模拟连接成功用于测试
-        qDebug() << "ChatClient: 异常情况下模拟连接成功用于测试";
-        QTimer::singleShot(500, this, [this]() {
-            qDebug() << "ChatClient: 异常情况下模拟连接成功回调执行";
-            m_connected = true;
-            emit connectionStatusChanged(true);
-            emit connected();
-            qDebug() << "ChatClient: 异常情况下模拟连接成功信号已发出";
-        });
     }
 }
 
@@ -179,6 +189,33 @@ void ChatClient::disconnectFromServer()
         QString error = QString("断开连接异常: %1").arg(e.what());
         emit errorOccurred(error);
         qCritical() << "ChatClient: 断开连接异常:" << error;
+    }
+}
+
+/**
+ * @brief 请求用户列表
+ */
+void ChatClient::requestUserList()
+{
+    if (!m_connected) {
+        qWarning() << "ChatClient: 未连接到服务器，无法请求用户列表";
+        return;
+    }
+    
+    try {
+        bool success = m_networkManager->requestUserList();
+        
+        if (!success) {
+            qWarning() << "ChatClient: 请求用户列表失败";
+            emit errorOccurred("请求用户列表失败");
+        } else {
+            qDebug() << "ChatClient: 用户列表请求已发送";
+        }
+        
+    } catch (const std::exception& e) {
+        QString error = QString("请求用户列表异常: %1").arg(e.what());
+        emit errorOccurred(error);
+        qCritical() << "ChatClient: 请求用户列表异常:" << error;
     }
 }
 

@@ -9,6 +9,13 @@
 #include <algorithm>
 #include <cctype>
 
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <sys/stat.h>
+#include <errno.h>
+#endif
+
 namespace Chat01
 {
     // 构造函数
@@ -178,6 +185,12 @@ namespace Chat01
     // 加载账号数据
     bool AccountManager::loadAccounts()
     {
+        // 确保目录存在
+        if (!ensureDirectoryExists(m_dataFilePath)) {
+            std::cerr << "[AccountManager] 无法确保目录存在: " << m_dataFilePath << std::endl;
+            return false;
+        }
+
         std::ifstream file(m_dataFilePath);
         if (!file.is_open())
         {
@@ -302,7 +315,12 @@ namespace Chat01
                     if (commaPos == std::string::npos) commaPos = accountObj.find('}', colonPos);
                     
                     std::string loginCountStr = accountObj.substr(colonPos + 1, commaPos - colonPos - 1);
-                    account.loginCount = std::stoi(loginCountStr);
+                    try {
+                        account.loginCount = std::stoi(loginCountStr);
+                    } catch (const std::exception& e) {
+                        std::cerr << "[AccountManager] 解析loginCount时发生错误: " << e.what() << std::endl;
+                        account.loginCount = 0;
+                    }
                 }
                 
                 // 将账号添加到映射中
@@ -324,7 +342,12 @@ namespace Chat01
                 if (commaPos == std::string::npos) commaPos = jsonContent.find('}', colonPos);
                 
                 std::string nextIDStr = jsonContent.substr(colonPos + 1, commaPos - colonPos - 1);
-                m_nextUserID = std::stoi(nextIDStr);
+                try {
+                    m_nextUserID = std::stoi(nextIDStr);
+                } catch (const std::exception& e) {
+                    std::cerr << "[AccountManager] 解析nextUserID时发生错误: " << e.what() << std::endl;
+                    m_nextUserID = m_accounts.size() + 1;
+                }
             }
 
             // totalAccounts应该等于实际加载的账号数量
@@ -342,9 +365,48 @@ namespace Chat01
         }
     }
 
+    // 确保目录存在
+    bool AccountManager::ensureDirectoryExists(const std::string& filePath)
+    {
+        // 查找最后一个目录分隔符
+        size_t lastSep = filePath.find_last_of("/\\");
+        if (lastSep == std::string::npos) {
+            // 没有目录分隔符，不需要创建目录
+            return true;
+        }
+        
+        // 提取目录路径
+        std::string directory = filePath.substr(0, lastSep);
+        
+        // 在Windows平台上创建目录
+#ifdef _WIN32
+        if (!CreateDirectoryA(directory.c_str(), NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            std::cerr << "[AccountManager] 无法创建目录: " << directory << ", 错误代码: " << GetLastError() << std::endl;
+            return false;
+        }
+#else
+        // 在POSIX平台上创建目录
+        struct stat st = {0};
+        if (stat(directory.c_str(), &st) == -1) {
+            if (mkdir(directory.c_str(), 0755) != 0) {
+                std::cerr << "[AccountManager] 无法创建目录: " << directory << ", 错误: " << strerror(errno) << std::endl;
+                return false;
+            }
+        }
+#endif
+        
+        return true;
+    }
+
     // 保存账号数据
     bool AccountManager::saveAccounts()
     {
+        // 确保目录存在
+        if (!ensureDirectoryExists(m_dataFilePath)) {
+            std::cerr << "[AccountManager] 无法确保目录存在: " << m_dataFilePath << std::endl;
+            return false;
+        }
+
         std::ofstream file(m_dataFilePath);
         if (!file.is_open())
         {

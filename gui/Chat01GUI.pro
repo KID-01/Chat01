@@ -16,7 +16,8 @@ SOURCES += src/main.cpp \
            src/mainwindow.cpp \
            src/loginwindow.cpp \
            src/chatclient.cpp \
-           ../client/src/ClientNetworkManager.cpp
+           ../client/src/ClientNetworkManager.cpp \
+           ../common/src/PlatformNetwork.cpp
 
 # 头文件目录
 HEADERS += include/mainwindow.h \
@@ -64,6 +65,7 @@ unix {
 }
 
 win32 {
-    # Windows特定配置
+    # Windows特定配置（MinGW 不识别 #pragma comment(lib)，须显式链接 Winsock）
     QMAKE_CXXFLAGS += -std=c++14
+    LIBS += -lws2_32
 }

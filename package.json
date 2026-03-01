@@ -1,0 +1,7 @@
+{
+  "type": "module",
+  "dependencies": {
+    "@itseasy21/mcp-knowledge-graph": "^1.0.7",
+    "@modelcontextprotocol/sdk": "^1.0.1"
+  }
+}

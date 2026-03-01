@@ -57,10 +57,10 @@ LoginWindow::~LoginWindow()
  */
 void LoginWindow::setupValidators()
 {
-    // IP地址验证器
-    QRegularExpression ipRegex("^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$");
-    QRegularExpressionValidator *ipValidator = new QRegularExpressionValidator(ipRegex, serverAddressEdit);
-    serverAddressEdit->setValidator(ipValidator);
+    // 服务器地址验证器（支持IP地址和域名，包括数字开头的域名）
+    QRegularExpression addressRegex("^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$|^(?:[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]\\.)*[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]$");
+    QRegularExpressionValidator *addressValidator = new QRegularExpressionValidator(addressRegex, serverAddressEdit);
+    serverAddressEdit->setValidator(addressValidator);
     
     // 端口号验证器
     portEdit->setValidator(new QIntValidator(1, 65535, portEdit));
@@ -204,9 +204,17 @@ void LoginWindow::onLoginClicked()
     QString username = usernameEdit->text().trimmed();
     QString serverAddress = serverAddressEdit->text().trimmed();
     int port = portEdit->text().toInt();
-    
+
+    // 检查用户名是否为空
+    if (username.isEmpty()) {
+        qWarning() << "LoginWindow: 用户名不能为空";
+        statusLabel->setText("用户名不能为空，请输入用户名");
+        statusLabel->setStyleSheet("color: red; font-size: 12px;");
+        return;
+    }
+
     qDebug() << "LoginWindow: 尝试连接到服务器" << serverAddress << ":" << port;
-    
+
     // 调用聊天客户端连接
     m_chatClient->connectToServer(serverAddress, port, username);
 }
